@@ -1,0 +1,11 @@
+{
+  // Copy this to e.g. personal.jsonc: example.jsonc is deliberately ignored.
+  "include": [
+    ".ssh/",
+    "Desktop/rust/",
+    "/etc/nixos/",
+  ],
+  "exclude": [
+    "Desktop/rust/*/target/",
+  ],
+}
