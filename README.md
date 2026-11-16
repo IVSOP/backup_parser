@@ -16,7 +16,12 @@ backup_parser init
 backup_parser backup --dry-run
 backup_parser backup
 backup_parser restore latest --target ./restored
+backup_parser prune --dry-run
+backup_parser prune
 ```
+
+`prune` removes unreferenced repository data. It does not delete snapshots; use
+restic's `forget` command to remove snapshots before reclaiming their storage.
 
 Also: `size`, `sort`, and `--help`. Omit `--target` to restore home paths into the
 base and external paths in place. Restic handles passwords normally.

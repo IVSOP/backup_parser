@@ -391,6 +391,59 @@ fn missing_input_preserves_restic_exit_three_and_password_path() {
 }
 
 #[test]
+fn prune_reclaims_forgotten_data_and_preserves_retained_snapshot() {
+    let project = Project::new();
+    project.cli(&["prune"], 10); // Preserve restic's missing-repository exit code.
+    project.cli(&["init"], 0);
+    project.write("content", "old content");
+    project.manifest("paths.json", &["content"], &[]);
+    project.cli(&["backup"], 0);
+    let forgotten = project.snapshots()[0].id.clone();
+    project.write("content", "retained content");
+    project.cli(&["backup"], 0);
+    project.restic(&[OsStr::new("forget"), OsStr::new(&forgotten)]);
+    let retained = project.snapshots()[0].id.clone();
+
+    let data = project.root().join("repo/data");
+    let packs: Vec<_> = fs::read_dir(&data)
+        .unwrap()
+        .flat_map(|directory| fs::read_dir(directory.unwrap().path()).unwrap())
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            let contents = fs::read(&path).unwrap();
+            (path, contents)
+        })
+        .collect();
+    assert!(!packs.is_empty());
+    project.cli(&["prune", "--dry-run"], 0);
+    for (path, contents) in &packs {
+        assert_eq!(&fs::read(path).unwrap(), contents);
+    }
+
+    fs::write(project.base.join("password"), "temporary-test-password\n").unwrap();
+    checked(
+        project
+            .command()
+            .env_remove("RESTIC_PASSWORD")
+            .args(["prune", "--repo", "repo", "--password-file", "password"])
+            .output()
+            .unwrap(),
+        0,
+    );
+    assert!(packs.iter().any(|(path, _)| !path.exists()));
+    let snapshots = project.snapshots();
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(snapshots[0].id, retained);
+    project.restic(&[OsStr::new("check"), OsStr::new("--read-data")]);
+    let destination = project.root().join("pruned restore");
+    project.restore(&retained, &destination, &["--verify"]);
+    assert_eq!(
+        fs::read_to_string(destination.join("content")).unwrap(),
+        "retained content"
+    );
+}
+
+#[test]
 fn size_exports_native_ncdu_and_removes_temporary_file() {
     let project = Project::new();
     project.cli(&["init"], 0);

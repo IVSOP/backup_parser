@@ -21,6 +21,12 @@ pub struct Cli {
 pub enum Operation {
     /// Initialize the restic repository
     Init,
+    /// Remove repository data no longer referenced by snapshots
+    Prune {
+        /// Show what would be removed without modifying the repository
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Back up the union of includes, minus all exclusions
     Backup(ManifestArgs),
     /// Restore home paths into the base and system paths to their original locations

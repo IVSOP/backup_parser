@@ -18,6 +18,14 @@ fn run(cli: Cli) -> Result<u8> {
     let restic = Restic::new(&cli.repo, cli.password_file.as_deref(), &base)?;
     match cli.operation {
         Operation::Init => restic.run(restic.command().arg("init")),
+        Operation::Prune { dry_run } => {
+            let mut command = restic.command();
+            command.arg("prune");
+            if dry_run {
+                command.arg("--dry-run");
+            }
+            restic.run(&mut command)
+        }
         Operation::Backup(args) => restic.backup(&args, &base),
         Operation::Restore(args) => restore::restore(&restic, &args, &base),
         Operation::Size { snapshot } => restic.size(&snapshot),
