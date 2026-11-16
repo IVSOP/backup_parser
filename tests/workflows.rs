@@ -445,6 +445,31 @@ fn prune_reclaims_forgotten_data_and_preserves_retained_snapshot() {
 }
 
 #[test]
+fn list_reads_password_from_inherited_stdin() {
+    let project = Project::new();
+    project.cli(&["init"], 0);
+    project.write("content", "snapshot content");
+    project.manifest("paths.json", &["content"], &[]);
+    project.cli(&["backup"], 0);
+    let snapshot = project.snapshots()[0].id.clone();
+    let password = project.root().join("stdin-password");
+    fs::write(&password, "temporary-test-password\n").unwrap();
+    for arguments in [vec!["list"], vec!["list", "--json"], vec!["snapshots"]] {
+        let output = checked(
+            project
+                .command()
+                .args(arguments)
+                .env_remove("RESTIC_PASSWORD")
+                .stdin(fs::File::open(&password).unwrap())
+                .output()
+                .unwrap(),
+            0,
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains(&snapshot));
+    }
+}
+
+#[test]
 fn list_select_parents_restore_and_delete_snapshots() {
     let project = Project::new();
     project.cli(&["list"], 10);

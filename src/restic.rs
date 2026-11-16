@@ -112,6 +112,8 @@ impl Restic {
 
     pub fn output(&self, command: &mut Command) -> Result<Vec<u8>> {
         let result = command
+            // Capturing stdout must still allow restic to read password prompts.
+            .stdin(Stdio::inherit())
             .stderr(Stdio::inherit())
             .output()
             .with_context(|| format!("Cannot run {command:?}"))?;
