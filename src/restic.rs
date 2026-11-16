@@ -1,4 +1,4 @@
-use crate::{cli::ManifestArgs, manifest, paths};
+use crate::{cli::BackupArgs, manifest, paths, snapshots};
 use anyhow::{Context, Result};
 use percent_encoding::{AsciiSet, CONTROLS, percent_encode};
 use std::{
@@ -121,8 +121,18 @@ impl Restic {
         Ok(result.stdout)
     }
 
-    pub fn backup(&self, args: &ManifestArgs, base: &Path) -> Result<u8> {
-        let sources = manifest::sources(&args.files_dir, base)?;
+    pub fn backup(&self, args: &BackupArgs, base: &Path) -> Result<u8> {
+        let sources = manifest::sources(&args.manifest.files_dir, base)?;
+        let parent = args
+            .parent
+            .as_deref()
+            .or(args.snapshot.as_deref())
+            .map(|selector| {
+                snapshots::Catalog::load(self)?
+                    .resolve(selector)
+                    .map(|s| s.id.clone())
+            })
+            .transpose()?;
         let mut input = NamedTempFile::new()?;
         for path in sources.include {
             input.write_all(path.as_os_str().as_bytes())?;
@@ -147,17 +157,21 @@ impl Restic {
         for path in sources.exclude {
             command.arg("--exclude").arg(paths::literal_pattern(&path)?);
         }
-        if args.dry_run {
+        if let Some(parent) = parent {
+            command.arg("--parent").arg(parent);
+        }
+        if args.manifest.dry_run {
             command.arg("--dry-run");
         }
         self.run(&mut command)
     }
 
     pub fn size(&self, snapshot: &str) -> Result<u8> {
+        let snapshot = snapshots::resolve_tree(self, snapshot)?;
         let export = NamedTempFile::new()?;
         let code = self.run(
             self.command()
-                .args(["ls", "--ncdu", "--", snapshot])
+                .args(["ls", "--ncdu", "--", &snapshot])
                 .stdout(export.reopen()?),
         )?;
         if code != 0 {

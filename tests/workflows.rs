@@ -134,6 +134,7 @@ impl Project {
 struct Snapshot {
     id: String,
     tags: Option<Vec<String>>,
+    parent: Option<String>,
 }
 
 #[test]
@@ -444,11 +445,121 @@ fn prune_reclaims_forgotten_data_and_preserves_retained_snapshot() {
 }
 
 #[test]
+fn list_select_parents_restore_and_delete_snapshots() {
+    let project = Project::new();
+    project.cli(&["list"], 10);
+    project.cli(&["init"], 0);
+    let empty = project.cli(&["list", "--json"], 0);
+    assert!(
+        serde_json::from_slice::<Vec<serde_json::Value>>(&empty.stdout)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(String::from_utf8_lossy(&project.cli(&["list"], 0).stdout).contains("No snapshots"));
+    project.cli(&["restore", "1"], 1);
+    project.cli(&["delete"], 2); // Deletion requires an explicit selection.
+
+    project.write("content", "first snapshot");
+    project.manifest("paths.json", &["content"], &[]);
+    project.cli(&["backup"], 0);
+    let first = project.snapshots()[0].id.clone();
+    project.write("content", "second snapshot");
+    project.cli(&["backup", "1"], 0);
+    let snapshots = project.snapshots();
+    assert_eq!(snapshots.len(), 2);
+    assert_eq!(snapshots[1].parent.as_deref(), Some(first.as_str()));
+    project.write("content", "third snapshot");
+    let prefix = format!("id:{}", &first[..12]);
+    project.cli(&["backup", "--parent", &prefix], 0);
+    let snapshots = project.snapshots();
+    assert_eq!(snapshots.len(), 3);
+    assert_eq!(snapshots[2].parent.as_deref(), Some(first.as_str()));
+    let latest = snapshots[2].id.clone();
+    project.cli(&["backup", "latest", "--dry-run"], 0);
+    project.cli(&["backup", "--snapshot", "1", "--dry-run"], 0);
+    project.cli(&["backup", "1", "--parent", "latest"], 2);
+    project.cli(&["backup", "99"], 1);
+    assert_eq!(project.snapshots().len(), 3);
+
+    let listing = checked(
+        project
+            .command()
+            .args(["snapshots", "--json"])
+            .env("RESTIC_HOST", "a-host-that-does-not-exist")
+            .output()
+            .unwrap(),
+        0,
+    );
+    let listing: Vec<serde_json::Value> = serde_json::from_slice(&listing.stdout).unwrap();
+    assert_eq!(listing.len(), 3);
+    let text = String::from_utf8(project.cli(&["list"], 0).stdout).unwrap();
+    assert!(text.starts_with("NUMBER\tID\tDATE\tHOST\tPATHS\n"));
+    for (index, snapshot) in listing.iter().enumerate() {
+        assert_eq!(snapshot["number"], index + 1);
+        assert_eq!(snapshot["id"], snapshots[index].id);
+        assert!(text.contains(snapshot["id"].as_str().unwrap()));
+        assert!(text.contains(snapshot["time"].as_str().unwrap()));
+        assert!(text.contains(snapshot["hostname"].as_str().unwrap()));
+        assert!(text.contains(snapshot["paths"][0].as_str().unwrap()));
+    }
+    let restored = project.root().join("numbered restore");
+    project.restore("1", &restored, &["--verify"]);
+    assert_eq!(
+        fs::read_to_string(restored.join("content")).unwrap(),
+        "first snapshot"
+    );
+    project.restore(&prefix, &restored, &[]);
+    project.restore("latest", &restored, &[]);
+    assert_eq!(
+        fs::read_to_string(restored.join("content")).unwrap(),
+        "third snapshot"
+    );
+    let subtree = project.root().join("numbered subtree");
+    checked(
+        project
+            .command()
+            .args([
+                "restore",
+                &format!("1:{}", project.base.display()),
+                "--target",
+            ])
+            .arg(&subtree)
+            .output()
+            .unwrap(),
+        0,
+    );
+    assert_eq!(
+        fs::read_to_string(subtree.join("content")).unwrap(),
+        "first snapshot"
+    );
+
+    project.cli(&["delete", "1", "2", "--dry-run", "--prune"], 0);
+    assert_eq!(project.snapshots().len(), 3);
+    project.cli(&["delete", "1", "99"], 1); // Validate every selector before deleting.
+    project.cli(&["delete", "1", "--all"], 2);
+    assert_eq!(project.snapshots().len(), 3);
+    project.cli(&["delete", "1", &first, "2"], 0); // Resolve numbers once and deduplicate IDs.
+    let snapshots = project.snapshots();
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(snapshots[0].id, latest);
+    let listing: Vec<serde_json::Value> =
+        serde_json::from_slice(&project.cli(&["list", "--json"], 0).stdout).unwrap();
+    assert_eq!(listing[0]["number"], 1);
+    assert_eq!(listing[0]["id"], latest);
+    project.cli(&["forget", "latest", "--prune"], 0);
+    assert!(project.snapshots().is_empty());
+}
+
+#[test]
 fn size_exports_native_ncdu_and_removes_temporary_file() {
     let project = Project::new();
     project.cli(&["init"], 0);
     project.write("exists", "content");
     project.manifest("paths.json", &["exists"], &[]);
+    project.cli(&["backup"], 0);
+    let first = project.snapshots()[0].id.clone();
+    project.write("new-file", "new snapshot content");
+    project.manifest("paths.json", &["new-file"], &[]);
     project.cli(&["backup"], 0);
     let bin = project.root().join("bin");
     fs::create_dir(&bin).unwrap();
@@ -463,18 +574,30 @@ fn size_exports_native_ncdu_and_removes_temporary_file() {
     let path_capture = project.root().join("export-path");
     let mut paths = vec![bin];
     paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
-    checked(
-        project
-            .command()
-            .arg("size")
-            .env("PATH", std::env::join_paths(paths).unwrap())
-            .env("GDU_CAPTURE", &capture)
-            .env("GDU_PATH_CAPTURE", &path_capture)
-            .output()
-            .unwrap(),
-        0,
-    );
-    assert!(fs::read_to_string(capture).unwrap().contains("restic"));
-    let export_path = fs::read_to_string(path_capture).unwrap();
-    assert!(!Path::new(&export_path).exists());
+    let search_path = std::env::join_paths(paths).unwrap();
+    let prefix = format!("id:{}", &first[..12]);
+    for (selectors, expected_file) in [
+        (vec![], "new-file"),
+        (vec!["1"], "exists"),
+        (vec![prefix.as_str()], "exists"),
+        (vec!["latest"], "new-file"),
+    ] {
+        checked(
+            project
+                .command()
+                .arg("size")
+                .args(selectors)
+                .env("PATH", &search_path)
+                .env("GDU_CAPTURE", &capture)
+                .env("GDU_PATH_CAPTURE", &path_capture)
+                .output()
+                .unwrap(),
+            0,
+        );
+        let export = fs::read_to_string(&capture).unwrap();
+        assert!(export.contains("restic"));
+        assert!(export.contains(expected_file));
+        let export_path = fs::read_to_string(&path_capture).unwrap();
+        assert!(!Path::new(&export_path).exists());
+    }
 }

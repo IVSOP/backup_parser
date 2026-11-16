@@ -27,17 +27,53 @@ pub enum Operation {
         #[arg(long)]
         dry_run: bool,
     },
+    /// List all snapshots with their numbers, IDs, dates, hosts, and paths
+    #[command(alias = "snapshots")]
+    List {
+        /// Print snapshot metadata as JSON, including the snapshot number
+        #[arg(long)]
+        json: bool,
+    },
+    /// Delete selected snapshots (use prune to reclaim unreferenced storage)
+    #[command(alias = "forget")]
+    Delete(DeleteArgs),
     /// Back up the union of includes, minus all exclusions
-    Backup(ManifestArgs),
+    Backup(BackupArgs),
     /// Restore home paths into the base and system paths to their original locations
     Restore(RestoreArgs),
     /// Browse a snapshot's size using gdu and restic's ncdu export
     Size {
+        /// Snapshot number from list, ID/prefix, or latest
         #[arg(default_value = "latest")]
         snapshot: String,
     },
     /// Sort include/exclude arrays, preserving comments and file permissions
     Sort(ManifestArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct BackupArgs {
+    #[command(flatten)]
+    pub manifest: ManifestArgs,
+    /// Parent snapshot number from list, ID/prefix, or latest (creates a new snapshot)
+    #[arg(conflicts_with = "parent")]
+    pub snapshot: Option<String>,
+    /// Choose a parent explicitly; otherwise restic chooses its usual parent
+    #[arg(long, alias = "snapshot", value_name = "SNAPSHOT")]
+    pub parent: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct DeleteArgs {
+    /// Snapshot numbers from list, IDs/prefixes, or latest
+    #[arg(required = true, num_args = 1.., value_name = "SNAPSHOT")]
+    pub snapshots: Vec<String>,
+    /// Preview deletion without changing the repository
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Also reclaim unreferenced storage after deletion
+    #[arg(long)]
+    pub prune: bool,
 }
 
 #[derive(Debug, Args)]
@@ -52,6 +88,7 @@ pub struct ManifestArgs {
 
 #[derive(Debug, Args)]
 pub struct RestoreArgs {
+    /// Snapshot number from list, ID/prefix, or latest; optionally followed by :/subtree
     #[arg(default_value = "latest")]
     pub snapshot: String,
     /// Stage the stored tree beneath this directory, without remapping paths

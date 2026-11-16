@@ -2,6 +2,7 @@ use crate::{
     cli::{Layout, RestoreArgs},
     paths,
     restic::{BASE_TAG, LAYOUT_TAG, Restic},
+    snapshots,
 };
 use anyhow::{Context, Result, bail, ensure};
 use path_clean::PathClean;
@@ -182,13 +183,18 @@ fn plan(
     Ok(jobs)
 }
 
-fn restore_jobs(restic: &Restic, args: &RestoreArgs, base: &Path) -> Result<Vec<RestoreJob>> {
+fn restore_jobs(
+    restic: &Restic,
+    args: &RestoreArgs,
+    base: &Path,
+    selector: &str,
+) -> Result<Vec<RestoreJob>> {
     let output = restic.output(restic.command().args([
         "--no-lock",
         "snapshots",
         "--json",
         "--",
-        &args.snapshot,
+        selector,
     ]))?;
     let mut snapshots: Vec<Snapshot> =
         serde_json::from_slice(&output).context("Invalid restic snapshots JSON")?;
@@ -240,10 +246,11 @@ fn restore_jobs(restic: &Restic, args: &RestoreArgs, base: &Path) -> Result<Vec<
 }
 
 pub fn restore(restic: &Restic, args: &RestoreArgs, base: &Path) -> Result<u8> {
+    let selector = snapshots::resolve_tree(restic, &args.snapshot)?;
     let target = args.target.as_deref().or(args.positional_target.as_deref());
-    let jobs = if target.is_some() || args.snapshot.contains(':') {
+    let jobs = if target.is_some() || selector.contains(':') {
         vec![RestoreJob {
-            selector: args.snapshot.clone(),
+            selector,
             target: target
                 .map(paths::caller_path)
                 .transpose()?
@@ -251,7 +258,7 @@ pub fn restore(restic: &Restic, args: &RestoreArgs, base: &Path) -> Result<u8> {
             includes: Vec::new(),
         }]
     } else {
-        restore_jobs(restic, args, base)?
+        restore_jobs(restic, args, base, &selector)?
     };
     if jobs.is_empty() {
         bail!("Snapshot contains no paths");

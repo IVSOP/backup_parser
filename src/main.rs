@@ -3,6 +3,7 @@ mod manifest;
 mod paths;
 mod restic;
 mod restore;
+mod snapshots;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -27,6 +28,8 @@ fn run(cli: Cli) -> Result<u8> {
             restic.run(&mut command)
         }
         Operation::Backup(args) => restic.backup(&args, &base),
+        Operation::List { json } => snapshots::list(&restic, json),
+        Operation::Delete(args) => snapshots::delete(&restic, &args),
         Operation::Restore(args) => restore::restore(&restic, &args, &base),
         Operation::Size { snapshot } => restic.size(&snapshot),
         Operation::Sort(args) => manifest::sort_files(&args.files_dir, args.dry_run),
