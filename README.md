@@ -6,7 +6,8 @@ Back up JSON/JSONC path manifests with restic.
 {"include": ["A/"], "exclude": ["A/B/"]}
 ```
 
-Exclusions win across manifests. Relative paths use `--base-path` (default: `$HOME`).
+`exclude` is optional and defaults to an empty array. Exclusions win across
+manifests. Relative paths use `--base-path` (default: `$HOME`).
 Repository and manifest defaults are `./repo` and `./files`; `example.jsonc` is ignored.
 
 ```sh

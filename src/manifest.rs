@@ -30,6 +30,7 @@ impl TryFrom<String> for PathEntry {
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
     pub include: Vec<PathEntry>,
+    #[serde(default)]
     pub exclude: Vec<PathEntry>,
 }
 
@@ -124,7 +125,9 @@ fn sorted_text(text: &str) -> Result<String> {
     let root = CstRootNode::parse(text, &options())?;
     let object = root.object_value().context("Expected a manifest object")?;
     for name in ["include", "exclude"] {
-        let array = object.array_value(name).context("Expected a path array")?;
+        let Some(array) = object.array_value(name) else {
+            continue;
+        };
         // Opening comments remain headers; other notes travel with entries.
         array
             .sort_elements()
@@ -191,11 +194,20 @@ mod tests {
             r#"{"include": [1], "exclude": []}"#,
             r#"{"include": [""], "exclude": []}"#,
             r#"{"include": ["\u0000"], "exclude": []}"#,
-            r#"{"include": []}"#,
+            r#"{"exclude": []}"#,
+            r#"{"include": [], "exclude": null}"#,
             r#"{"include": [], "include": [], "exclude": []}"#,
         ] {
             assert!(parse(text).is_err(), "accepted {text}");
         }
+    }
+
+    #[test]
+    fn sorts_manifest_without_exclusions() -> Result<()> {
+        let text = r#"{"include": ["z", "a"]}"#;
+        assert!(parse(text)?.exclude.is_empty());
+        assert_eq!(sorted_text(text)?, r#"{"include": ["a", "z"]}"#);
+        Ok(())
     }
 
     #[test]
