@@ -2,7 +2,7 @@ use crate::{
     cli::{Layout, RestoreArgs},
     paths,
     restic::{BASE_TAG, LAYOUT_TAG, Restic},
-    snapshots,
+    snapshots::{Catalog, Snapshot},
 };
 use anyhow::{Context, Result, bail, ensure};
 use path_clean::PathClean;
@@ -14,20 +14,6 @@ use std::{
     os::unix::ffi::OsStringExt,
     path::{Path, PathBuf},
 };
-
-#[derive(Debug, Deserialize)]
-struct Snapshot {
-    id: String,
-    paths: Vec<PathBuf>,
-    #[serde(default)]
-    tags: Option<Vec<String>>,
-}
-
-impl Snapshot {
-    fn tags(&self) -> &[String] {
-        self.tags.as_deref().unwrap_or_default()
-    }
-}
 
 #[derive(Deserialize)]
 #[serde(tag = "struct_type")]
@@ -114,7 +100,7 @@ fn plan(
     candidates: Vec<(PathBuf, Option<PathBuf>)>,
     present: &HashSet<PathBuf>,
 ) -> Result<Vec<RestoreJob>> {
-    let absolute = snapshot.tags().iter().any(|tag| tag == LAYOUT_TAG);
+    let absolute = snapshot.tags().any(|tag| tag == LAYOUT_TAG);
     let mut jobs: Vec<RestoreJob> = Vec::new();
     for (path, relative) in candidates {
         let choices = match &relative {
@@ -187,26 +173,10 @@ fn restore_jobs(
     restic: &Restic,
     args: &RestoreArgs,
     base: &Path,
-    selector: &str,
+    snapshot: &Snapshot,
 ) -> Result<Vec<RestoreJob>> {
-    let output = restic.output(restic.command().args([
-        "--no-lock",
-        "snapshots",
-        "--json",
-        "--",
-        selector,
-    ]))?;
-    let mut snapshots: Vec<Snapshot> =
-        serde_json::from_slice(&output).context("Invalid restic snapshots JSON")?;
-    ensure!(
-        snapshots.len() == 1,
-        "Expected one snapshot for {:?}, found {}; use its ID",
-        args.snapshot,
-        snapshots.len()
-    );
-    let snapshot = snapshots.pop().context("Snapshot is missing")?;
-    let source_base = saved_base(&snapshot, args.source_base.as_deref(), base)?;
-    let candidates = candidates(&snapshot, &source_base)?;
+    let source_base = saved_base(snapshot, args.source_base.as_deref(), base)?;
+    let candidates = candidates(snapshot, &source_base)?;
     // Query only parents of candidate sources, avoiding a recursive scan of the snapshot.
     let mut parents = candidates
         .iter()
@@ -236,7 +206,7 @@ fn restore_jobs(
         }
     }
     plan(
-        &snapshot,
+        snapshot,
         &source_base,
         base,
         args.layout,
@@ -245,8 +215,9 @@ fn restore_jobs(
     )
 }
 
-pub fn restore(restic: &Restic, args: &RestoreArgs, base: &Path) -> Result<u8> {
-    let selector = snapshots::resolve_tree(restic, &args.snapshot)?;
+pub fn restore(restic: &mut Restic, args: &RestoreArgs, base: &Path) -> Result<u8> {
+    let catalog = Catalog::load_for_operation(restic)?;
+    let (snapshot, selector) = catalog.resolve_tree(&args.snapshot)?;
     let target = args.target.as_deref().or(args.positional_target.as_deref());
     let jobs = if target.is_some() || selector.contains(':') {
         vec![RestoreJob {
@@ -258,7 +229,7 @@ pub fn restore(restic: &Restic, args: &RestoreArgs, base: &Path) -> Result<u8> {
             includes: Vec::new(),
         }]
     } else {
-        restore_jobs(restic, args, base, &selector)?
+        restore_jobs(restic, args, base, snapshot)?
     };
     if jobs.is_empty() {
         bail!("Snapshot contains no paths");
@@ -298,15 +269,12 @@ mod tests {
 
     #[test]
     fn legacy_mixed_plan_and_ambiguity() -> Result<()> {
-        let snapshot = Snapshot {
-            id: "abc".into(),
-            tags: None,
-            paths: vec![
-                "/home/old/Desktop".into(),
-                "/home/old/.ssh".into(),
-                "/services/app".into(),
-            ],
-        };
+        let snapshot = serde_json::from_value(serde_json::json!({
+            "id": "abc",
+            "time": "2026-01-01T00:00:00Z",
+            "hostname": "host",
+            "paths": ["/home/old/Desktop", "/home/old/.ssh", "/services/app"],
+        }))?;
         let base = Path::new("/home/new");
         let source = saved_base(&snapshot, None, base)?;
         assert_eq!(source, Path::new("/home/old"));

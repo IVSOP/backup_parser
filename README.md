@@ -51,6 +51,7 @@ snapshots removes their references; use `prune` or `delete --prune` to reclaim
 unreferenced storage. Pruning preserves all remaining snapshots.
 
 Also: `size`, `sort`, and `--help`. Omit `--target` to restore home paths into the
-base and external paths in place. Restic handles passwords normally.
+base and external paths in place. Commands that run Restic multiple times reuse
+the repository password for that invocation.
 
 Develop: `nix develop path:.`. Check: `nix flake check path:.`.

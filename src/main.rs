@@ -16,7 +16,7 @@ fn run(cli: Cli) -> Result<u8> {
         .base_path
         .context("HOME is unset; pass --base-path DIR")?;
     let base = paths::base_directory(&base)?;
-    let restic = Restic::new(&cli.repo, cli.password_file.as_deref(), &base)?;
+    let mut restic = Restic::new(&cli.repo, cli.password_file.as_deref(), &base)?;
     match cli.operation {
         Operation::Init => restic.run(restic.command().arg("init")),
         Operation::Prune { dry_run } => {
@@ -29,8 +29,8 @@ fn run(cli: Cli) -> Result<u8> {
         }
         Operation::Backup(args) => restic.backup(&args, &base),
         Operation::List { json } => snapshots::list(&restic, json),
-        Operation::Delete(args) => snapshots::delete(&restic, &args),
-        Operation::Restore(args) => restore::restore(&restic, &args, &base),
+        Operation::Delete(args) => snapshots::delete(&mut restic, &args),
+        Operation::Restore(args) => restore::restore(&mut restic, &args, &base),
         Operation::Size { snapshot } => restic.size(&snapshot),
         Operation::Sort(args) => manifest::sort_files(&args.files_dir, args.dry_run),
     }

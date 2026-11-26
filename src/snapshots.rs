@@ -5,6 +5,7 @@ use std::{
     collections::HashSet,
     io::{self, Write},
     path::PathBuf,
+    process::Command,
 };
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -12,9 +13,20 @@ pub struct Snapshot {
     pub id: String,
     time: String,
     hostname: String,
-    paths: Vec<PathBuf>,
+    pub paths: Vec<PathBuf>,
     #[serde(flatten)]
     metadata: serde_json::Map<String, serde_json::Value>,
+}
+
+impl Snapshot {
+    pub fn tags(&self) -> impl Iterator<Item = &str> {
+        self.metadata
+            .get("tags")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+    }
 }
 
 pub struct Catalog {
@@ -22,20 +34,23 @@ pub struct Catalog {
 }
 
 impl Catalog {
-    pub fn load(restic: &Restic) -> Result<Self> {
+    fn command(restic: &Restic) -> Command {
         // Restic sorts this ungrouped listing chronologically, oldest first.
         // Clear RESTIC_HOST's implicit filter so numbers cover the entire repository.
-        let output = restic.output(restic.command().args([
-            "snapshots",
-            "--json",
-            "--group-by",
-            "",
-            "--host",
-            "",
-        ]))?;
+        let mut command = restic.command();
+        command.args(["snapshots", "--json", "--group-by", "", "--host", ""]);
+        command
+    }
+
+    fn from_json(output: &[u8]) -> Result<Self> {
         Ok(Self {
-            snapshots: serde_json::from_slice(&output).context("Invalid restic snapshots JSON")?,
+            snapshots: serde_json::from_slice(output).context("Invalid restic snapshots JSON")?,
         })
+    }
+
+    pub fn load_for_operation(restic: &mut Restic) -> Result<Self> {
+        let output = restic.output_with_reusable_password(&mut Self::command(restic))?;
+        Self::from_json(&output)
     }
 
     pub fn resolve(&self, selector: &str) -> Result<&Snapshot> {
@@ -80,30 +95,29 @@ impl Catalog {
         );
         Ok(snapshot)
     }
-}
-
-/// Resolve an optional subtree suffix while retaining restic's ID:/path syntax.
-pub fn resolve_tree(restic: &Restic, selector: &str) -> Result<String> {
-    let (prefix, selector) = match selector.strip_prefix("id:") {
-        Some(selector) => ("id:", selector),
-        None => ("", selector),
-    };
-    let (snapshot, subtree) = selector
-        .split_once(':')
-        .map_or((selector, None), |(id, path)| (id, Some(path)));
-    let catalog = Catalog::load(restic)?;
-    let snapshot = catalog.resolve(&format!("{prefix}{snapshot}"))?;
-    match subtree {
-        Some(path) => {
-            ensure!(path.starts_with('/'), "Snapshot subtree must start with /");
-            Ok(format!("{}:{path}", snapshot.id))
-        }
-        None => Ok(snapshot.id.clone()),
+    /// Resolve an optional subtree suffix while retaining restic's ID:/path syntax.
+    pub fn resolve_tree(&self, selector: &str) -> Result<(&Snapshot, String)> {
+        let (prefix, selector) = match selector.strip_prefix("id:") {
+            Some(selector) => ("id:", selector),
+            None => ("", selector),
+        };
+        let (snapshot, subtree) = selector
+            .split_once(':')
+            .map_or((selector, None), |(id, path)| (id, Some(path)));
+        let snapshot = self.resolve(&format!("{prefix}{snapshot}"))?;
+        let tree = match subtree {
+            Some(path) => {
+                ensure!(path.starts_with('/'), "Snapshot subtree must start with /");
+                format!("{}:{path}", snapshot.id)
+            }
+            None => snapshot.id.clone(),
+        };
+        Ok((snapshot, tree))
     }
 }
 
 pub fn list(restic: &Restic, json: bool) -> Result<u8> {
-    let catalog = Catalog::load(restic)?;
+    let catalog = Catalog::from_json(&restic.output(&mut Catalog::command(restic))?)?;
     let mut output = io::stdout().lock();
     if json {
         #[derive(Serialize)]
@@ -147,8 +161,8 @@ pub fn list(restic: &Restic, json: bool) -> Result<u8> {
     Ok(0)
 }
 
-pub fn delete(restic: &Restic, args: &DeleteArgs) -> Result<u8> {
-    let catalog = Catalog::load(restic)?;
+pub fn delete(restic: &mut Restic, args: &DeleteArgs) -> Result<u8> {
+    let catalog = Catalog::load_for_operation(restic)?;
     // Resolve every selector before deleting anything, so deleting one number
     // cannot shift the meaning of another number in the same command.
     let mut ids = Vec::new();

@@ -2,17 +2,19 @@ use crate::{cli::BackupArgs, manifest, paths, snapshots};
 use anyhow::{Context, Result};
 use percent_encoding::{AsciiSet, CONTROLS, percent_encode};
 use std::{
+    env,
     ffi::{OsStr, OsString},
     fmt,
-    io::Write,
+    io::{self, BufRead, IsTerminal, Write},
     os::unix::{ffi::OsStrExt, process::ExitStatusExt},
     path::{Path, PathBuf},
-    process::{Command, ExitStatus, Stdio},
+    process::{Child, Command, ExitStatus, Stdio},
 };
 use tempfile::NamedTempFile;
 
 pub const LAYOUT_TAG: &str = "backup-layout:absolute-v1";
 pub const BASE_TAG: &str = "backup-base:";
+const WRONG_PASSWORD: u8 = 12;
 // urllib.parse.quote(..., safe="/") compatibility for the Python snapshot tags.
 const TAG_ESCAPE: &AsciiSet = &CONTROLS
     .add(b' ')
@@ -62,6 +64,7 @@ fn exit_code(status: ExitStatus) -> u8 {
 pub struct Restic {
     repository: OsString,
     password_file: Option<PathBuf>,
+    password: Option<Vec<u8>>,
     base: PathBuf,
 }
 
@@ -86,6 +89,7 @@ impl Restic {
         Ok(Self {
             repository,
             password_file,
+            password: None,
             base: base.to_path_buf(),
         })
     }
@@ -104,33 +108,105 @@ impl Restic {
 
     pub fn run(&self, command: &mut Command) -> Result<u8> {
         Ok(exit_code(
-            command
-                .status()
-                .with_context(|| format!("Cannot run {command:?}"))?,
+            self.start(command)?
+                .wait()
+                .with_context(|| format!("Cannot wait for {command:?}"))?,
         ))
     }
 
     pub fn output(&self, command: &mut Command) -> Result<Vec<u8>> {
-        let result = command
-            // Capturing stdout must still allow restic to read password prompts.
-            .stdin(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .output()
-            .with_context(|| format!("Cannot run {command:?}"))?;
+        let result = self
+            .start(command.stdout(Stdio::piped()))?
+            .wait_with_output()
+            .with_context(|| format!("Cannot wait for {command:?}"))?;
         if !result.status.success() {
             return Err(CommandFailure(exit_code(result.status)).into());
         }
         Ok(result.stdout)
     }
 
-    pub fn backup(&self, args: &BackupArgs, base: &Path) -> Result<u8> {
+    pub fn output_with_reusable_password(&mut self, command: &mut Command) -> Result<Vec<u8>> {
+        if self.password_file.is_some()
+            || [
+                "RESTIC_PASSWORD",
+                "RESTIC_PASSWORD_FILE",
+                "RESTIC_PASSWORD_COMMAND",
+            ]
+            .iter()
+            .any(|name| env::var_os(name).is_some_and(|value| !value.is_empty()))
+        {
+            return self.output(command);
+        }
+
+        let stdin = io::stdin();
+        if !stdin.is_terminal() {
+            let mut password = Vec::new();
+            stdin
+                .lock()
+                .read_until(b'\n', &mut password)
+                .context("Cannot read repository password from stdin")?;
+            self.password = Some(password);
+            return self.output(command);
+        }
+
+        // Match Restic's three interactive attempts while opening the repository.
+        let mut attempts_left = 3;
+        loop {
+            let mut password = rpassword::prompt_password("enter password for repository: ")
+                .context("Cannot read repository password")?
+                .into_bytes();
+            password.push(b'\n');
+            self.password = Some(password);
+            let result = self.output(command);
+            attempts_left -= 1;
+            let wrong_password = result.as_ref().is_err_and(|error| {
+                matches!(
+                    error.downcast_ref::<CommandFailure>(),
+                    Some(CommandFailure(WRONG_PASSWORD))
+                )
+            });
+            if attempts_left == 0 || !wrong_password {
+                return result;
+            }
+            eprintln!("Try again.");
+        }
+    }
+
+    fn start(&self, command: &mut Command) -> Result<Child> {
+        let Some(password) = &self.password else {
+            return command
+                .spawn()
+                .with_context(|| format!("Cannot run {command:?}"));
+        };
+        let mut child = command
+            .stdin(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("Cannot run {command:?}"))?;
+        // Close the pipe after writing so Restic sees EOF. Never add the password
+        // to the command arguments or environment.
+        let result = child
+            .stdin
+            .take()
+            .expect("piped child stdin")
+            .write_all(password);
+        if let Err(error) = result
+            && error.kind() != io::ErrorKind::BrokenPipe
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error).context("Cannot pass repository password to Restic");
+        }
+        Ok(child)
+    }
+
+    pub fn backup(&mut self, args: &BackupArgs, base: &Path) -> Result<u8> {
         let sources = manifest::sources(&args.manifest.files_dir, base)?;
         let parent = args
             .parent
             .as_deref()
             .or(args.snapshot.as_deref())
             .map(|selector| {
-                snapshots::Catalog::load(self)?
+                snapshots::Catalog::load_for_operation(self)?
                     .resolve(selector)
                     .map(|s| s.id.clone())
             })
@@ -168,8 +244,9 @@ impl Restic {
         self.run(&mut command)
     }
 
-    pub fn size(&self, snapshot: &str) -> Result<u8> {
-        let snapshot = snapshots::resolve_tree(self, snapshot)?;
+    pub fn size(&mut self, snapshot: &str) -> Result<u8> {
+        let catalog = snapshots::Catalog::load_for_operation(self)?;
+        let (_, snapshot) = catalog.resolve_tree(snapshot)?;
         let export = NamedTempFile::new()?;
         let code = self.run(
             self.command()
@@ -179,11 +256,13 @@ impl Restic {
         if code != 0 {
             return Ok(code);
         }
-        self.run(
+        Ok(exit_code(
             Command::new("gdu")
                 .arg("-f")
                 .arg(export.path())
-                .current_dir(&self.base),
-        )
+                .current_dir(&self.base)
+                .status()
+                .context("Cannot run gdu")?,
+        ))
     }
 }

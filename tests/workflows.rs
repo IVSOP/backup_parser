@@ -3,9 +3,10 @@ use serde::{Deserialize, Serialize};
 use std::{
     ffi::OsStr,
     fs,
+    io::Write,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    process::{Command, Output},
+    process::{Command, Output, Stdio},
 };
 use tempfile::TempDir;
 
@@ -25,6 +26,23 @@ fn checked(output: Output, code: i32) -> Output {
         String::from_utf8_lossy(&output.stderr)
     );
     output
+}
+
+fn with_stdin_password(command: &mut Command) -> Output {
+    let mut child = command
+        .env_remove("RESTIC_PASSWORD")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"temporary-test-password\n")
+        .unwrap();
+    child.wait_with_output().unwrap()
 }
 
 impl Project {
@@ -200,7 +218,16 @@ fn backup_exclusions_restore_and_dry_runs() {
     let id = &snapshots[0].id;
     let restored = project.root().join("restored");
     fs::write(project.external.join("config.txt"), "changed").unwrap();
-    project.restore(id, &restored, &["--verify"]);
+    fs::create_dir(&restored).unwrap();
+    checked(
+        with_stdin_password(
+            project
+                .command()
+                .args(["restore", id, "--verify", "--base-path"])
+                .arg(&restored),
+        ),
+        0,
+    );
     for name in [
         "A/C/keep",
         "A/D/keep",
@@ -607,18 +634,14 @@ fn size_exports_native_ncdu_and_removes_temporary_file() {
         (vec![prefix.as_str()], "exists"),
         (vec!["latest"], "new-file"),
     ] {
-        checked(
-            project
-                .command()
-                .arg("size")
-                .args(selectors)
-                .env("PATH", &search_path)
-                .env("GDU_CAPTURE", &capture)
-                .env("GDU_PATH_CAPTURE", &path_capture)
-                .output()
-                .unwrap(),
-            0,
-        );
+        let mut command = project.command();
+        command
+            .arg("size")
+            .args(selectors)
+            .env("PATH", &search_path)
+            .env("GDU_CAPTURE", &capture)
+            .env("GDU_PATH_CAPTURE", &path_capture);
+        checked(with_stdin_password(&mut command), 0);
         let export = fs::read_to_string(&capture).unwrap();
         assert!(export.contains("restic"));
         assert!(export.contains(expected_file));
